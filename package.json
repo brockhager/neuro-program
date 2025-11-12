@@ -1,0 +1,18 @@
+{
+  "name": "neuro-program",
+  "version": "0.1.0",
+  "scripts": {
+    "build": "anchor build",
+    "test": "anchor test",
+    "deploy": "anchor deploy"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.29.0"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.0",
+    "mocha": "^10.0.0",
+    "ts-mocha": "^10.0.0",
+    "typescript": "^5.0.0"
+  }
+}
