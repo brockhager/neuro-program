@@ -3,6 +3,13 @@ use anchor_lang::solana_program::hash::hash;
 
 declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
 
+pub mod pda_seeds {
+    pub const MANIFEST: &[u8] = b"manifest";
+    pub const ATTESTATION: &[u8] = b"attestation";
+    pub const VALIDATOR: &[u8] = b"validator";
+    pub const GOVERNANCE: &[u8] = b"governance";
+}
+
 #[program]
 pub mod neuro_program {
     use super::*;
@@ -77,6 +84,24 @@ pub mod neuro_program {
         Ok(())
     }
 
+    pub fn reject_manifest(ctx: Context<RejectManifest>) -> Result<()> {
+        let manifest = &mut ctx.accounts.manifest;
+        
+        require!(!manifest.finalized, ErrorCode::ManifestAlreadyFinalized);
+        
+        // Only creator can reject their own manifest
+        require!(ctx.accounts.creator.key() == manifest.creator, ErrorCode::Unauthorized);
+
+        // Close the account to recover rent
+        manifest.close(ctx.accounts.creator.to_account_info())?;
+
+        emit!(ManifestRejected {
+            cid: manifest.cid.clone(),
+        });
+
+        Ok(())
+    }
+
     pub fn register_validator(ctx: Context<RegisterValidator>) -> Result<()> {
         let validator = &mut ctx.accounts.validator;
         let state = &mut ctx.accounts.state;
@@ -90,6 +115,52 @@ pub mod neuro_program {
         emit!(ValidatorRegistered {
             validator: validator.key(),
             authority: validator.authority,
+        });
+
+        Ok(())
+    }
+
+    pub fn update_validator(ctx: Context<UpdateValidator>, active: bool) -> Result<()> {
+        let validator = &mut ctx.accounts.validator;
+        
+        require!(ctx.accounts.authority.key() == validator.authority, ErrorCode::Unauthorized);
+
+        validator.active = active;
+
+        emit!(ValidatorUpdated {
+            validator: validator.key(),
+            active,
+        });
+
+        Ok(())
+    }
+
+    pub fn init_governance(ctx: Context<InitGovernance>) -> Result<()> {
+        let governance = &mut ctx.accounts.governance;
+        
+        governance.authority = ctx.accounts.authority.key();
+        governance.proposal_count = 0;
+        governance.total_stake = 0;
+        governance.created_at = Clock::get()?.unix_timestamp;
+
+        emit!(GovernanceInitialized {
+            governance: governance.key(),
+            authority: governance.authority,
+        });
+
+        Ok(())
+    }
+
+    pub fn update_governance(ctx: Context<UpdateGovernance>, new_authority: Pubkey) -> Result<()> {
+        let governance = &mut ctx.accounts.governance;
+        
+        require!(ctx.accounts.authority.key() == governance.authority, ErrorCode::Unauthorized);
+
+        governance.authority = new_authority;
+
+        emit!(GovernanceUpdated {
+            governance: governance.key(),
+            new_authority,
         });
 
         Ok(())
@@ -112,7 +183,7 @@ pub struct InitManifest<'info> {
         init,
         payer = creator,
         space = 8 + 32 + (4 + 64) + 32 + 8 + 1 + 8,  // discriminator + creator + cid + data_hash + created_at + finalized + attestation_count
-        seeds = [b"manifest", creator.key().as_ref(), cid.as_bytes()],
+        seeds = [pda_seeds::MANIFEST, creator.key().as_ref(), cid.as_bytes()],
         bump
     )]
     pub manifest: Account<'info, Manifest>,
@@ -127,7 +198,7 @@ pub struct Attest<'info> {
         init,
         payer = validator_authority,
         space = 8 + 32 + 32 + 1 + 8,  // discriminator + validator + manifest + confidence + created_at
-        seeds = [b"attestation", validator.key().as_ref(), manifest.key().as_ref()],
+        seeds = [pda_seeds::ATTESTATION, validator.key().as_ref(), manifest.key().as_ref()],
         bump
     )]
     pub attestation: Account<'info, Attestation>,
@@ -148,12 +219,20 @@ pub struct FinalizeManifest<'info> {
 }
 
 #[derive(Accounts)]
+pub struct RejectManifest<'info> {
+    #[account(mut, close = creator)]
+    pub manifest: Account<'info, Manifest>,
+    #[account(mut)]
+    pub creator: Signer<'info>,
+}
+
+#[derive(Accounts)]
 pub struct RegisterValidator<'info> {
     #[account(
         init,
         payer = authority,
         space = 8 + 32 + 1 + 8,  // discriminator + authority + active + registered_at
-        seeds = [b"validator", authority.key().as_ref()],
+        seeds = [pda_seeds::VALIDATOR, authority.key().as_ref()],
         bump
     )]
     pub validator: Account<'info, Validator>,
@@ -162,6 +241,35 @@ pub struct RegisterValidator<'info> {
     #[account(mut)]
     pub authority: Signer<'info>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateValidator<'info> {
+    #[account(mut)]
+    pub validator: Account<'info, Validator>,
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct InitGovernance<'info> {
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + 32 + 8 + 8 + 8,  // discriminator + authority + proposal_count + total_stake + created_at
+        seeds = [pda_seeds::GOVERNANCE],
+        bump
+    )]
+    pub governance: Account<'info, Governance>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateGovernance<'info> {
+    #[account(mut)]
+    pub governance: Account<'info, Governance>,
+    pub authority: Signer<'info>,
 }
 
 #[account]
@@ -195,6 +303,14 @@ pub struct Validator {
     pub registered_at: i64,
 }
 
+#[account]
+pub struct Governance {
+    pub authority: Pubkey,
+    pub proposal_count: u64,
+    pub total_stake: u64,
+    pub created_at: i64,
+}
+
 #[event]
 pub struct ManifestCreated {
     pub cid: String,
@@ -221,6 +337,29 @@ pub struct ValidatorRegistered {
     pub authority: Pubkey,
 }
 
+#[event]
+pub struct ValidatorUpdated {
+    pub validator: Pubkey,
+    pub active: bool,
+}
+
+#[event]
+pub struct GovernanceInitialized {
+    pub governance: Pubkey,
+    pub authority: Pubkey,
+}
+
+#[event]
+pub struct GovernanceUpdated {
+    pub governance: Pubkey,
+    pub new_authority: Pubkey,
+}
+
+#[event]
+pub struct ManifestRejected {
+    pub cid: String,
+}
+
 #[error_code]
 pub enum ErrorCode {
     #[msg("Validator is not active")]
@@ -229,4 +368,8 @@ pub enum ErrorCode {
     InvalidConfidence,
     #[msg("Insufficient attestations for finalization")]
     InsufficientAttestations,
+    #[msg("Manifest is already finalized")]
+    ManifestAlreadyFinalized,
+    #[msg("Unauthorized operation")]
+    Unauthorized,
 }
